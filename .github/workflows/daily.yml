@@ -1,0 +1,290 @@
+name: The Human Experiment — Daily Pipeline
+
+# ═══════════════════════════════════════════════════════════════════
+#  TRIGGERS
+#  Runs automatically at 18:00 UTC daily (2PM EST / 7PM BST).
+#  This targets the peak scroll window for US East + UK simultaneously.
+#  Can also be triggered manually from the Actions tab (workflow_dispatch).
+# ═══════════════════════════════════════════════════════════════════
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:        # Manual trigger for testing
+
+# ── Prevent concurrent runs ────────────────────────────────────────
+concurrency:
+  group: the-human-experiment-pipeline
+  cancel-in-progress: false   # Never cancel a running pipeline mid-render
+
+jobs:
+  run-pipeline:
+    name: Research → Write → Render → Upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 90       # Hard cap — prevents runaway jobs on billing
+
+    # ── Environment variables from GitHub Secrets ──────────────────
+    # Add ALL of these to: Settings → Secrets and variables → Actions
+    env:
+      GEMINI_API_KEY:        ${{ secrets.GEMINI_API_KEY }}
+      OPENROUTER_API_KEY:    ${{ secrets.OPENROUTER_API_KEY }}
+      YOUTUBE_TOKEN_JSON:    ${{ secrets.YOUTUBE_TOKEN_JSON }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN:  ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PEXELS_API_KEY:        ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY:       ${{ secrets.PIXABAY_API_KEY }}
+      SEARCH_API_KEY:        ${{ secrets.SEARCH_API_KEY }}
+      GOOGLE_CSE_ID:         ${{ secrets.GOOGLE_CSE_ID }}
+      META_ACCESS_TOKEN:     ${{ secrets.META_ACCESS_TOKEN }}
+      FB_PAGE_ID:            ${{ secrets.FB_PAGE_ID }}
+      IG_USER_ID:            ${{ secrets.IG_USER_ID }}
+      GITHUB_ACTIONS:        "true"
+      # HuggingFace cache — keeps depth model between runs
+      HF_HOME:               /home/runner/.cache/huggingface
+      TRANSFORMERS_CACHE:    /home/runner/.cache/huggingface/transformers
+
+    steps:
+
+      # ── 1. Checkout repository ────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1      # Shallow clone — faster
+
+      # ── 2. Python setup ───────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip          # Cache pip downloads between runs
+
+      # ── 3. System dependencies ────────────────────────────────────
+      #  These are required by MoviePy, OpenCV, pydub, and faster-whisper.
+      #  Installing in one apt-get call is faster than multiple calls.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            libwebp-dev \
+            imagemagick \
+            libmagickwand-dev \
+            libsm6 \
+            libxext6 \
+            libxrender-dev \
+            libsndfile1 \
+            libportaudio2 \
+            libgl1-mesa-glx \
+            fonts-dejavu-core \
+            fonts-liberation \
+            wget \
+            curl
+
+      # ── 4. Fix ImageMagick policy for MoviePy TextClip ────────────
+      #  Ubuntu's ImageMagick ships with a restrictive policy.xml that
+      #  blocks PDF/EPS rendering, which causes MoviePy TextClip to fail.
+      #  This replaces the policy with a permissive one.
+      - name: Fix ImageMagick security policy
+        run: |
+          POLICY_FILE=$(find /etc/ImageMagick-* -name "policy.xml" 2>/dev/null | head -1)
+          if [ -n "$POLICY_FILE" ]; then
+            sudo sed -i 's/rights="none" pattern="PDF"/rights="read|write" pattern="PDF"/' "$POLICY_FILE"
+            sudo sed -i 's/rights="none" pattern="EPS"/rights="read|write" pattern="EPS"/' "$POLICY_FILE"
+            sudo sed -i 's/rights="none" pattern="XPS"/rights="read|write" pattern="XPS"/' "$POLICY_FILE"
+            echo "✅ ImageMagick policy updated: $POLICY_FILE"
+          else
+            echo "⚠️  ImageMagick policy.xml not found — skipping"
+          fi
+
+      # ── 5. Cache HuggingFace models ───────────────────────────────
+      #  Depth-Anything-V2-Small is ~100MB. Caching avoids re-downloading
+      #  on every run, which would add ~60s per pipeline run.
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/huggingface
+          key: hf-depth-anything-v2-small-${{ runner.os }}
+          restore-keys: |
+            hf-depth-anything-v2-small-
+
+      # ── 6. Install Python dependencies ────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt --break-system-packages
+
+      # ── 7. Restore memory file (topics.txt) ───────────────────────
+      #  topics.txt tracks which studies have already been covered.
+      #  We cache it between runs so the channel never repeats content.
+      - name: Restore topics memory file
+        uses: actions/cache@v4
+        with:
+          path: topics.txt
+          key: topics-memory-${{ github.run_number }}
+          restore-keys: |
+            topics-memory-
+
+      # ── 8. Create topics.txt if first run ─────────────────────────
+      - name: Initialise topics file
+        run: |
+          if [ ! -f topics.txt ]; then
+            touch topics.txt
+            echo "📝 Created fresh topics.txt"
+          else
+            echo "📚 Topics memory: $(wc -l < topics.txt) entries"
+          fi
+
+      # ── 9. Create SFX directory with silent placeholders ──────────
+      #  If you have real SFX files, commit them to /sfx/ in the repo.
+      #  If not, this step creates 1-second silent .mp3 files so the
+      #  pipeline runs without crashing — just without the stinger audio.
+      - name: Prepare SFX directory
+        run: |
+          mkdir -p sfx
+          SFX_FILES=(
+            "deep_impact.mp3"
+            "reverb_hit.mp3"
+            "low_drone_sting.mp3"
+            "radio_static_burst.mp3"
+            "knock.mp3"
+            "scream.mp3"
+            "footsteps.mp3"
+            "static.mp3"
+            "whisper.mp3"
+            "thud.mp3"
+            "clock_tick.mp3"
+            "deep_silence.mp3"
+          )
+          for sfx in "${SFX_FILES[@]}"; do
+            if [ ! -f "sfx/$sfx" ]; then
+              # Generate a 1-second silent MP3 placeholder using ffmpeg
+              ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 1 \
+                -acodec libmp3lame -q:a 9 "sfx/$sfx" -y -loglevel quiet
+              echo "  📁 Created silent placeholder: sfx/$sfx"
+            fi
+          done
+          echo "✅ SFX directory ready ($(ls sfx/ | wc -l) files)"
+
+      # ── 10. Validate required secrets ─────────────────────────────
+      #  Fails fast with a clear message if critical secrets are missing,
+      #  rather than letting the pipeline run for 30 minutes before failing.
+      - name: Validate required secrets
+        run: |
+          MISSING=()
+
+          if [ -z "$GEMINI_API_KEY" ]; then
+            MISSING+=("GEMINI_API_KEY")
+          fi
+          if [ -z "$YOUTUBE_TOKEN_JSON" ]; then
+            MISSING+=("YOUTUBE_TOKEN_JSON")
+          fi
+          if [ -z "$PEXELS_API_KEY" ]; then
+            MISSING+=("PEXELS_API_KEY (optional — pipeline continues without it)")
+          fi
+
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "❌ Missing required secrets:"
+            printf '  - %s\n' "${MISSING[@]}"
+            if [ -z "$GEMINI_API_KEY" ] || [ -z "$YOUTUBE_TOKEN_JSON" ]; then
+              echo "GEMINI_API_KEY and YOUTUBE_TOKEN_JSON are required. Aborting."
+              exit 1
+            fi
+          else
+            echo "✅ All required secrets present."
+          fi
+
+      # ── 11. Write YouTube token to file ───────────────────────────
+      #  The YouTube OAuth token is stored as a JSON secret.
+      #  The pipeline reads it from the YOUTUBE_TOKEN_JSON env var directly —
+      #  no file write needed. This step just validates it is parseable.
+      - name: Validate YouTube token format
+        run: |
+          echo "$YOUTUBE_TOKEN_JSON" | python3 -c "
+          import json, sys
+          try:
+              data = json.loads(sys.stdin.read())
+              required = ['token', 'refresh_token', 'client_id', 'client_secret']
+              missing = [k for k in required if k not in data]
+              if missing:
+                  print(f'⚠️  YouTube token missing fields: {missing}')
+              else:
+                  print('✅ YouTube token format valid.')
+          except json.JSONDecodeError as e:
+              print(f'❌ YouTube token is not valid JSON: {e}')
+              sys.exit(1)
+          "
+
+      # ── 12. Run the full pipeline ──────────────────────────────────
+      #  This is the main event. Runs main.py which orchestrates all 25 steps.
+      #  Exit code 0 = success, 1 = pipeline failure.
+      #  The pipeline itself handles all internal errors gracefully.
+      - name: Run The Human Experiment pipeline
+        run: |
+          echo "════════════════════════════════════════"
+          echo "  Starting pipeline at $(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo "════════════════════════════════════════"
+          python main.py
+          EXIT_CODE=$?
+          echo "════════════════════════════════════════"
+          echo "  Pipeline finished with exit code: $EXIT_CODE"
+          echo "  Completed at $(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo "════════════════════════════════════════"
+          exit $EXIT_CODE
+
+      # ── 13. Upload final video as artifact ────────────────────────
+      #  Keeps the last 3 rendered videos accessible from the Actions tab.
+      #  Useful for debugging visual/audio issues without re-running.
+      - name: Upload rendered video as artifact
+        if: always()          # Run even if pipeline step failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video-${{ github.run_number }}
+          path: final_video.mp4
+          if-no-files-found: ignore
+          retention-days: 3
+
+      # ── 14. Upload thumbnail as artifact ──────────────────────────
+      - name: Upload thumbnail as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thumbnail-${{ github.run_number }}
+          path: thumbnail.jpg
+          if-no-files-found: ignore
+          retention-days: 3
+
+      # ── 15. Save topics memory ────────────────────────────────────
+      #  Always save the updated topics.txt, even on failure, to prevent
+      #  the pipeline from proposing the same study again next run.
+      - name: Save topics memory
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: topics.txt
+          key: topics-memory-${{ github.run_number }}
+
+      # ── 16. Cleanup workspace ─────────────────────────────────────
+      #  Removes large temp files to keep the runner disk clean.
+      #  GitHub Actions runners have ~14GB disk — with video files
+      #  this can fill up across runs without cleanup.
+      - name: Cleanup workspace
+        if: always()
+        run: |
+          rm -f temp_*.wav temp_*.jpg temp_*.mp4 temp_*.mp3
+          rm -f final_video.mp4 thumbnail.jpg
+          echo "✅ Workspace cleaned."
+
+      # ── 17. Report outcome ────────────────────────────────────────
+      - name: Report final status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Pipeline completed successfully."
+            echo "   Check YouTube channel @TheHumanExperiment for the new video."
+          else
+            echo "❌ Pipeline failed."
+            echo "   Check the 'Run The Human Experiment pipeline' step above for details."
+            echo "   Common causes:"
+            echo "     - API rate limit hit (GEMINI_API_KEY quota)"
+            echo "     - YouTube token expired (regenerate and update secret)"
+            echo "     - Cloudflare FLUX.1 quota exceeded (pipeline falls back to Pexels)"
+          fi
