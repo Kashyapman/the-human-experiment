@@ -1,0 +1,40 @@
+# ═══════════════════════════════════════════════════════════════════
+#  THE HUMAN EXPERIMENT — Python Dependencies
+#  Pin major versions to prevent silent breaking changes on Actions.
+#  Run: pip install -r requirements.txt --break-system-packages
+# ═══════════════════════════════════════════════════════════════════
+
+# ── Google AI ────────────────────────────────────────────────────
+google-genai>=1.5.0
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.130.0
+
+# ── LLM / OpenRouter ─────────────────────────────────────────────
+requests>=2.31.0
+
+# ── Audio ────────────────────────────────────────────────────────
+pydub>=0.25.1
+faster-whisper>=1.0.3
+
+# ── Video ────────────────────────────────────────────────────────
+moviepy>=1.0.3
+imageio>=2.34.0
+imageio-ffmpeg>=0.4.9
+
+# ── Vision / Image ───────────────────────────────────────────────
+Pillow>=10.3.0
+opencv-python-headless>=4.9.0.80
+numpy>=1.26.0
+
+# ── Depth Estimation (Parallax Engine) ───────────────────────────
+transformers>=4.40.0
+torch>=2.3.0
+torchvision>=0.18.0
+
+# ── YouTube Upload ───────────────────────────────────────────────
+# (google-api-python-client already covers this)
+
+# ── Utilities ────────────────────────────────────────────────────
+decorator>=4.4.2
+tqdm>=4.66.0
