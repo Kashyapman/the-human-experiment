@@ -78,6 +78,11 @@ jobs:
             fonts-liberation \
             wget \
             curl
+            sudo sed -i '/<policy domain="path" rights="none" pattern="@\*"/d' /etc/ImageMagick-6/policy.xml || true
+          
+          # Prevents Error 13 (Permission denied) when saving dynamic assets
+            mkdir -p assets temp images downloads
+            chmod -R 777 assets temp images downloads
 
       # ── 4. Fix ImageMagick policy for MoviePy TextClip ────────────
       #  Ubuntu's ImageMagick ships with a restrictive policy.xml that
