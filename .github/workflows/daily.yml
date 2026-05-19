@@ -73,7 +73,7 @@ jobs:
             libxrender-dev \
             libsndfile1 \
             libportaudio2 \
-            libgl1-mesa-glx \
+            libgl1 \
             fonts-dejavu-core \
             fonts-liberation \
             wget \
