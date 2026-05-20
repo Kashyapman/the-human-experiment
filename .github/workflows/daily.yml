@@ -76,6 +76,7 @@ jobs:
             libgl1 \
             fonts-dejavu-core \
             fonts-liberation \
+            fonts-urw-base35 \
             wget \
             curl
             sudo sed -i '/<policy domain="path" rights="none" pattern="@\*"/d' /etc/ImageMagick-6/policy.xml || true
@@ -107,9 +108,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/huggingface
-          key: hf-depth-anything-v2-small-${{ runner.os }}
+          key: hf-depth-anything-small-hf-${{ runner.os }}
           restore-keys: |
-            hf-depth-anything-v2-small-
+            hf-depth-anything-small-hf-
 
       # ── 6. Install Python dependencies ────────────────────────────
       - name: Install Python dependencies
