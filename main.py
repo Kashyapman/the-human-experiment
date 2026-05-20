@@ -342,7 +342,12 @@ def get_top_free_openrouter_models(limit: int = 3) -> list[str]:
             "gemma-2-9b",       # Inconsistent JSON output
             "phi-3-mini",       # Too small
             "phi-3.5-mini",
-            "qwen3-next-80b-a3b"# Too small
+            "qwen3-next-80b-a3b",
+            "lfm-2.5-1.2b",      # add this — 1.2B model, too small
+            "lfm-2.5",            # block the whole lfm-2.5 family
+            "-1.2b",              # block anything under 3B by size suffix
+            "-0.5b",
+            "-1b:"
         ]
         free_ids = [
             m["id"] for m in all_models
@@ -1925,7 +1930,7 @@ def generate_depth_map(image_path: str) -> str | None:
     try:
         estimator  = hf_pipeline(
             task="depth-estimation",
-            model="depth-anything/Depth-Anything-V2-Small",
+            model="depth-anything/Depth-Anything-V2-Small-hf",
             device="cpu",
         )
         img        = PIL.Image.open(image_path).convert("RGB")
@@ -1991,6 +1996,7 @@ def get_image_clip(search_query: str, ai_prompt: str, duration: float, index: in
         )
 
         # Depth parallax attempt
+        base = base.set_duration(duration)
         cropped_path = f"temp_cropped_{index}.jpg"
         base.save_frame(cropped_path, t=0)
         depth_path = generate_depth_map(cropped_path)
@@ -2339,15 +2345,19 @@ def add_end_screen(video_clip, last_clean_line: str = ""):
 
         closing = last_clean_line if "?" in last_clean_line else "What would you have done?"
 
-        q = (TextClip(closing, fontsize=50, color="white", font="Impact",
-                      stroke_color="#BB1414", stroke_width=2,
-                      method="caption", size=(int(VIDEO_WIDTH * 0.84), None))
-             .set_position("center").set_duration(END_DUR).fx(fadein, 0.75))
+        q = (TextClip(closing, fontsize=50, color="white", font="DejaVu-Sans-Bold",
+              stroke_color="#BB1414", stroke_width=2,
+              method="caption", size=(int(VIDEO_WIDTH * 0.84), None))
+     .set_position("center").set_duration(END_DUR).fx(fadein, 0.75))
 
         h = (TextClip(CHANNEL_HANDLE, fontsize=28,
-                      color="#6E7278", font="Impact")
+                      color="#6E7278", font="DejaVu-Sans-Bold")
              .set_position(("center", int(VIDEO_HEIGHT * 0.76)))
              .set_duration(END_DUR).fx(fadein, 1.3))
+        
+        # In the watermark block (Step 20):
+        wm = (TextClip(CHANNEL_HANDLE, fontsize=26, color="white",
+                       font="DejaVu-Sans-Bold", stroke_color="black", stroke_width=1)
 
         end = CompositeVideoClip([card, q, h])
         return concatenate_videoclips([video_clip, end], method="compose")
@@ -2578,7 +2588,7 @@ def main_pipeline() -> bool:
 
     # ── Step 17: Visual Direction ─────────────────────────────────────────
     print("\n── Phase 3: Visual Direction ─────────────────────────────────")
-    required_images = max(2, int(master_voice.duration / IMAGE_TRANSITION_T))
+    required_images = min(max(2, int(master_voice.duration / IMAGE_TRANSITION_T)), 12)
     visual_prompts  = generate_all_visual_prompts(
         full_script_text, required_images, era, sota_models
     )
@@ -2682,6 +2692,8 @@ def main_pipeline() -> bool:
 
     # ── Step 23: YouTube upload ───────────────────────────────────────────
     print("\n── Phase 5: Metadata Tasks ───────────────────────────────────")
+    print("  ⏳ Rate limit recovery pause (30s)...")
+    time.sleep(30)   # ADD THIS LINE
     title       = task_write_youtube_title(full_script_text, key_stat, study_name, sota_models)
     description = task_write_youtube_description(title, study_name, key_stat, sota_models)
     tags        = task_write_seo_tags(title, study_name, era, sota_models)
