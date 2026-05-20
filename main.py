@@ -335,11 +335,21 @@ def get_top_free_openrouter_models(limit: int = 3) -> list[str]:
         if r.status_code != 200:
             return DEFAULT_SOTA_MODELS
         all_models = r.json().get("data", [])
+        # Add this constant near the top with the other config
+        BLOCKED_MODELS = [
+            "llama-3.2-3b",     # Too small — fails format instructions
+            "llama-3.2-1b",     # Too small
+            "gemma-2-9b",       # Inconsistent JSON output
+            "phi-3-mini",       # Too small
+            "phi-3.5-mini",
+            "qwen3-next-80b-a3b"# Too small
+        ]
         free_ids = [
             m["id"] for m in all_models
-            if (m.get("pricing", {}).get("prompt") == "0"
+            if ((m.get("pricing", {}).get("prompt") == "0"
                 and m.get("pricing", {}).get("completion") == "0")
-            or ":free" in m["id"]
+                or ":free" in m["id"])
+            and not any(blocked in m["id"].lower() for blocked in BLOCKED_MODELS)
         ]
         if not free_ids:
             return DEFAULT_SOTA_MODELS
@@ -641,20 +651,34 @@ def validate_key_stat_json(text: str) -> tuple[bool, str]:
 
 
 def validate_visual_prompt_json(text: str) -> tuple[bool, str]:
-    """Must parse as JSON with 'search_query' and 'ai_prompt'."""
+    """
+    Must parse as JSON with 'search_query' (string or list) and 'ai_prompt' (string).
+    Handles the case where a model returns search_query as a JSON array.
+    """
     try:
         raw = text.replace("```json", "").replace("```", "").strip()
         data = json.loads(raw)
         if "search_query" not in data or "ai_prompt" not in data:
             return False, "Must have 'search_query' and 'ai_prompt' fields."
-        if len(data["search_query"].split()) > 6:
-            return False, "'search_query' must be 6 words or fewer."
-        if len(data["ai_prompt"]) < 30:
-            return False, "'ai_prompt' too short."
+
+        # Handle search_query returned as a list ["word1", "word2"]
+        sq = data["search_query"]
+        if isinstance(sq, list):
+            sq = " ".join(str(item) for item in sq)
+            data["search_query"] = sq  # normalise in place
+
+        if not isinstance(sq, str):
+            return False, f"'search_query' must be a string, got {type(sq).__name__}."
+
+        if len(sq.split()) > 8:
+            return False, f"'search_query' too long ({len(sq.split())} words). Max 8."
+
+        if len(str(data["ai_prompt"])) < 20:
+            return False, "'ai_prompt' too short (min 20 chars)."
+
         return True, ""
     except json.JSONDecodeError as e:
         return False, f"Invalid JSON: {e}"
-
 
 def validate_youtube_title(text: str) -> tuple[bool, str]:
     """Must be ≤ 55 chars and not start with a banned phrase."""
@@ -862,25 +886,62 @@ def task_identify_contradiction(key_facts: str, study_name: str, sota_models: li
 def task_detect_era(research_brief: str, sota_models: list[str]) -> str | None:
     """
     Task 0.4 — ONE job: detect the decade of the study.
-
     Returns exactly one of the ERA_STYLES keys.
+    Robust to models wrapping the answer in extra text.
     """
     allowed = list(ERA_STYLES.keys())
+
+    def _fuzzy_era_validator(text: str) -> tuple[bool, str]:
+        """
+        Scans the response for any valid era string anywhere in the text.
+        This handles models that return 'The era is: 1970s-1980s' instead
+        of just '1970s-1980s'.
+        """
+        t = text.strip()
+        # First try exact match
+        if t in allowed:
+            return True, ""
+        # Then scan for any allowed value inside the text
+        for era in allowed:
+            if era in t:
+                return True, ""
+        return False, (
+            f"Could not find a valid era in response: '{t[:80]}'. "
+            f"Must contain one of: {allowed}"
+        )
+
     prompt = (
         f"Read this research text and identify which era the study took place in.\n"
-        f"Return ONLY one of these exact strings: {allowed}\n\n"
+        f"Return ONLY one of these exact strings, nothing else: {allowed}\n\n"
         f"RESEARCH TEXT:\n{research_brief[:1500]}"
     )
-    result = single_task_llm(
+
+    raw = single_task_llm(
         task_name   = "Detect Era",
         sys_prompt  = _RESEARCH_SYS,
         user_prompt = prompt,
-        validator   = validate_era,
+        validator   = _fuzzy_era_validator,
         sota_models = sota_models,
         temperature = 0.0,
     )
-    return result if result else "unknown"
 
+    if not raw:
+        # Regex fallback — extract from raw text using year detection
+        years = re.findall(r"\b(1[89]\d{2}|20[012]\d)\b", research_brief)
+        if years:
+            earliest = min(int(y) for y in years)
+            if   earliest < 1935: return "1900s-1930s"
+            elif earliest < 1965: return "1940s-1960s"
+            elif earliest < 1990: return "1970s-1980s"
+            elif earliest < 2010: return "1990s-2000s"
+            else:                 return "modern"
+        return "unknown"
+
+    # Extract the matched era from wherever it appears in the response
+    for era in allowed:
+        if era in raw:
+            return era
+    return raw.strip() if raw.strip() in allowed else "unknown"
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  PHASE 1 — WRITING TASKS
@@ -1062,8 +1123,7 @@ def task_write_impossible_detail(
         task_name   = "Write Impossible Detail",
         sys_prompt  = _WRITER_SYS,
         user_prompt = prompt,
-        validator   = validate_n_lines(n=2, min_w=6, max_w=20)
-                      if True else validate_single_line(6, 20),
+        validator   = _validate_one_or_two_lines,
         sota_models = sota_models,
         temperature = 0.88,
     )
@@ -1071,6 +1131,22 @@ def task_write_impossible_detail(
         return [l.strip() for l in result.strip().split("\n") if l.strip()]
     return None
 
+def _validate_one_or_two_lines(text: str) -> tuple[bool, str]:
+    """Accepts 1 or 2 lines, each 6-22 words. Used for impossible detail."""
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    lines = [re.sub(r"^[\d\-\.\)]+\s*", "", l) for l in lines]
+    if len(lines) < 1 or len(lines) > 2:
+        return False, f"Expected 1 or 2 lines, got {len(lines)}."
+    for i, line in enumerate(lines):
+        wc = len(line.split())
+        if wc < 5:
+            return False, f"Line {i+1} too short ({wc} words)."
+        if wc > 24:
+            return False, f"Line {i+1} too long ({wc} words)."
+        ok, err = _check_banned(line)
+        if not ok:
+            return False, f"Line {i+1}: {err}"
+    return True, ""
 
 def task_write_loop_ending(
     hook_line:     str,
@@ -1412,7 +1488,11 @@ def task_write_one_visual_prompt(
     if result:
         try:
             raw = result.replace("```json", "").replace("```", "").strip()
-            return json.loads(raw)
+            data = json.loads(raw)
+            # Normalise search_query if it came back as a list
+            if isinstance(data.get("search_query"), list):
+                data["search_query"] = " ".join(str(x) for x in data["search_query"])
+            return data
         except Exception:
             pass
 
@@ -2531,13 +2611,9 @@ def main_pipeline() -> bool:
         # Atmospheric overlay (22% opacity)
         if fetch_atmospheric_b_roll(master_voice.duration):
             try:
-                atm = (VideoFileClip("temp_atmosphere.mp4").without_audio()
-                       .fx(audio_loop if False else lambda c: c,  # audio_loop not applicable
-                          )  # noqa — just chain below
-                       )
                 from moviepy.video.fx.all import loop as vfx_loop
-                atm = (vfx_loop(atm, duration=master_voice.duration)
-                       .resize(height=VIDEO_HEIGHT))
+                atm = VideoFileClip("temp_atmosphere.mp4").without_audio()
+                atm = vfx_loop(atm, duration=master_voice.duration).resize(height=VIDEO_HEIGHT)
                 if atm.w < VIDEO_WIDTH:
                     atm = atm.resize(width=VIDEO_WIDTH)
                 atm = (atm.crop(x_center=atm.w/2, y_center=atm.h/2,
